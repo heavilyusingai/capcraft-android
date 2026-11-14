@@ -55,12 +55,15 @@ pub fn export_size(width: u32, height: u32, resolution: u32) -> Vec<u32> {
 }
 
 /// A bitrate for a frame size and rate that looks right on a phone: about
-/// what phone cameras record at.
+/// what phone cameras record at, kept inside gold-standard ranges for
+/// each resolution - H.264 4K at 30 fps lands at about 25 Mbps, inside
+/// the 13-34 Mbps that 4K needs; HEVC gets about three fifths of that.
 #[uniffi::export]
 pub fn suggested_bitrate_kbps(width: u32, height: u32, fps: u32) -> u32 {
     let pixels = f64::from(width) * f64::from(height);
-    // a fifth of a bit a pixel a frame: about 12 Mbps for 1080p at 30 fps, what phone editors suggest
-    let per_frame = pixels * 0.2;
+    // a tenth of a bit a pixel a frame: about 12 Mbps for 1080p at 30 fps,
+    // about 25 Mbps for 4K at 30 fps - inside gold-standard 4K ranges
+    let per_frame = pixels * 0.1;
     ((per_frame * f64::from(fps.max(1)) / 1000.0) as u32).clamp(1000, 120_000)
 }
 
@@ -135,10 +138,22 @@ impl MobileSession {
             let canvas = session.settings();
             let size = export_size(canvas.width, canvas.height, settings.resolution);
             let (width, height) = (size[0], size[1]);
+            // Gold standard for file export: VBR keeps quality up on busy
+            // scenes and bits down on calm ones - the phone's MediaCodec
+            // encoder runs VBR anyway, and the software encoders honour it.
+            let rate_mode = RateMode::Vbr;
+            // HEVC needs about three fifths of H.264's bitrate for the same
+            // picture at 4K (gold standard: H.264 13-34 Mbps, HEVC
+            // 12-20 Mbps at 4K 30 fps); a caller-supplied bitrate wins.
             let bitrate = if settings.bitrate_kbps > 0 {
                 settings.bitrate_kbps
             } else {
-                suggested_bitrate_kbps(width, height, settings.fps)
+                let base = suggested_bitrate_kbps(width, height, settings.fps);
+                if settings.hevc {
+                    base * 3 / 5
+                } else {
+                    base
+                }
             };
             let spec = ExportSpec {
                 output: settings.output.clone(),
@@ -150,8 +165,7 @@ impl MobileSession {
                     VideoCodec::H264
                 },
                 ten_bit: false,
-                // the target to hold; the phone's encoder holds it in VBR
-                rate_mode: RateMode::Cbr,
+                rate_mode,
                 bitrate_kbps: bitrate,
                 color_range: Default::default(),
                 hdr: false,
