@@ -2465,3 +2465,33 @@ fn a_background_is_wiped_with_its_picture() {
         "the edge is the picture's"
     );
 }
+
+/// `CONCAT_GPU` on Android names the API asked first (issue #20): `vulkan`
+/// and `gl`, in any case and with any padding, and nothing else names one.
+#[test]
+fn android_forced_backend_names() {
+    assert_eq!(
+        android_forced_backend(Some("vulkan")),
+        Some(wgpu::Backends::VULKAN)
+    );
+    assert_eq!(
+        android_forced_backend(Some("VULKAN")),
+        Some(wgpu::Backends::VULKAN)
+    );
+    assert_eq!(
+        android_forced_backend(Some(" gl ")),
+        Some(wgpu::Backends::GL)
+    );
+    assert_eq!(android_forced_backend(Some("software")), None);
+    assert_eq!(android_forced_backend(Some("metal")), None);
+    assert_eq!(android_forced_backend(Some("")), None);
+    assert_eq!(android_forced_backend(None), None);
+}
+
+/// The Android fallback is the other API, so a phone whose first API is
+/// hidden or broken still gets the second (issue #20).
+#[test]
+fn android_fallback_is_the_other_api() {
+    assert_eq!(other_backend(wgpu::Backends::VULKAN), wgpu::Backends::GL);
+    assert_eq!(other_backend(wgpu::Backends::GL), wgpu::Backends::VULKAN);
+}
