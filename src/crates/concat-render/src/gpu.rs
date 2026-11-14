@@ -753,6 +753,30 @@ fn work_format(adapter: &wgpu::Adapter) -> wgpu::TextureFormat {
     }
 }
 
+/// The backend `CONCAT_GPU` names on Android, if it names one: `vulkan`
+/// or `gl`, in any case, with any padding. Anything else - `software`,
+/// which means the safe start, or a value that names no API - names none,
+/// and the phone asks Vulkan first as it always has (issue #20).
+fn android_forced_backend(value: Option<&str>) -> Option<wgpu::Backends> {
+    match value.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        Some("vulkan") => Some(wgpu::Backends::VULKAN),
+        Some("gl") => Some(wgpu::Backends::GL),
+        _ => None,
+    }
+}
+
+/// The other Android graphics API: OpenGL ES where Vulkan was asked first,
+/// Vulkan where OpenGL ES was. Only ever called with one of the two, which
+/// is all a phone's `own` can be, so a phone whose first API is hidden or
+/// broken still gets the second (issue #20).
+fn other_backend(backends: wgpu::Backends) -> wgpu::Backends {
+    if backends == wgpu::Backends::VULKAN {
+        wgpu::Backends::GL
+    } else {
+        wgpu::Backends::VULKAN
+    }
+}
+
 /// A compositor that draws on the GPU. See the module docs.
 pub struct WgpuCompositor {
     device: wgpu::Device,
@@ -910,18 +934,34 @@ impl WgpuCompositor {
     /// then every API wgpu was built with. `software_only` leaves the
     /// hardware adapters out.
     fn own_api_first(software_only: bool) -> Option<Self> {
-        // CONCAT_GPU=software - set by hand, or by a safe start after a
-        // launch the GPU's driver killed - keeps the compositor off the GPU
-        // too, so an export or a card does not meet that driver either.
-        // Not on Android, where a safe start means OpenGL ES rather than
-        // Vulkan (#507): a phone has no software adapter, and reading it as
-        // "software alone" left the monitor and every export with nothing
-        // to draw on for the rest of the build. There it asks for GL first.
-        let safe = std::env::var("CONCAT_GPU")
-            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("software"));
+        // CONCAT_GPU - set by hand, or by a safe start after a launch the
+        // GPU's driver killed - keeps the compositor off the GPU too, so an
+        // export or a card does not meet that driver either. Not on Android,
+        // where a safe start means OpenGL ES rather than Vulkan (#507): a
+        // phone has no software adapter, and reading it as "software alone"
+        // left the monitor and every export with nothing to draw on for the
+        // rest of the build. There it asks for GL first.
+        //
+        // On Android the value also names the API asked first (issue #20):
+        // `vulkan` or `gl`, the other staying the fallback. A Pixel 10 Pro
+        // on PowerVR, whose driver reports Vulkan 1.1 and runs the GPU at a
+        // fraction of its clock, is the case `gl` exists for; a flagship
+        // Adreno generation whose driver wgpu-hal hides is the case the
+        // retry below exists for.
+        let gpu_env = std::env::var("CONCAT_GPU").ok();
+        let safe = gpu_env
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("software"));
         let android = cfg!(target_os = "android");
         let software_only = software_only || (safe && !android);
-        let own = if android && safe {
+        let forced = if android {
+            android_forced_backend(gpu_env.as_deref())
+        } else {
+            None
+        };
+        let own = if let Some(forced) = forced {
+            forced
+        } else if android && safe {
             wgpu::Backends::GL
         } else if cfg!(target_vendor = "apple") {
             wgpu::Backends::METAL
@@ -930,19 +970,67 @@ impl WgpuCompositor {
         } else {
             wgpu::Backends::VULKAN
         };
-        [own, wgpu::Backends::all()]
+        // On Android the two APIs are asked one at a time - Vulkan, then
+        // OpenGL ES, or the reverse when CONCAT_GPU names one - rather than
+        // `all()`, which would ask Vulkan twice and never reach GL on a
+        // phone whose Vulkan adapter is hidden or broken.
+        let order: [wgpu::Backends; 2] = if android {
+            [own, other_backend(own)]
+        } else {
+            [own, wgpu::Backends::all()]
+        };
+        let found = order
             .into_iter()
-            .find_map(|backends| Self::on_backends(backends, software_only))
+            .find_map(|backends| Self::on_backends(backends, software_only, false));
+        if found.is_some() || !android || software_only {
+            return found;
+        }
+        // Android, hardware pass, nothing opened: wgpu-hal hides a Vulkan
+        // adapter whose driver reports conformance version 0 - the
+        // immature drivers on new GPUs, PowerVR DXT on Pixel 10, a new
+        // Adreno generation on a flagship. Asked again allowing them, the
+        // adapter appears; a phone that already opened one never comes
+        // here, and a caller that asked for software alone never does
+        // either. The compositor's own error scopes still catch what the
+        // driver then gets wrong.
+        log::warn!(
+            "compositor: no adapter on the strict pass; retrying allowing non-compliant Vulkan adapters"
+        );
+        order
+            .into_iter()
+            .find_map(|backends| Self::on_backends(backends, software_only, true))
     }
 
     /// A compositor on the best adapter among `backends`, hardware before
     /// software - or software alone - or `None` when none of them opens a
-    /// device.
-    fn on_backends(backends: wgpu::Backends, software_only: bool) -> Option<Self> {
+    /// device. `allow_noncompliant` admits the Vulkan adapters wgpu-hal
+    /// hides for reporting conformance version 0; only the Android retry in
+    /// [`WgpuCompositor::own_api_first`] sets it, after the strict pass
+    /// found nothing (issue #20).
+    fn on_backends(
+        backends: wgpu::Backends,
+        software_only: bool,
+        allow_noncompliant: bool,
+    ) -> Option<Self> {
         let mut descriptor = wgpu::InstanceDescriptor {
             backends,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         };
+        // Runtime escape hatch: WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1
+        // lets users enable non-compliant Vulkan adapters (Mali/PanVK etc.)
+        // without rebuilding - wgpu-hal hides adapters reporting
+        // conformance_version.major == 0 unless this flag is set (issue #20).
+        let mut flags = wgpu::InstanceFlags::default();
+        if std::env::var("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            flags |= wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+        }
+        descriptor.flags = flags;
+        if allow_noncompliant {
+            descriptor.flags |= wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+        }
         // FXC, never wgpu's default `Auto`: Concat ships no dxcompiler.dll,
         // so `Auto` loads whichever one Windows finds on PATH - Obsidian's or
         // another Electron app's - and a build that does not match wgpu, or
@@ -1002,6 +1090,17 @@ impl WgpuCompositor {
                     info.name
                 );
             }
+            // Said at info, so a report of stutter or a slow export carries
+            // which adapter drew it - its name, its kind and its API, and
+            // whether it was the software adapter - instead of leaving the
+            // reporter to guess whether the GPU was used at all (issue #20).
+            log::info!(
+                "compositor: drawing on {} ({:?}, {:?}){}",
+                info.name,
+                info.device_type,
+                info.backend,
+                if software { " [software]" } else { "" }
+            );
             // The reason, when it dies, in the log: see the window's device.
             let name = info.name;
             let lost = name.clone();

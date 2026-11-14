@@ -1035,12 +1035,32 @@ fn open_video(
         // too, so an encoder that misjudges its budget still spends enough
         // on each picture.
         _ if family == Family::MediaCodec => match attempt {
-            Attempt::AsAsked => ffmpeg::dict! {
-                "bitrate_mode" => "vbr",
-                "qp_i_max" => MEDIACODEC_QP_MAX,
-                "qp_p_max" => MEDIACODEC_QP_MAX,
-                "qp_b_max" => MEDIACODEC_QP_MAX,
-            },
+            Attempt::AsAsked => {
+                let mut settings = ffmpeg::dict! {
+                    "bitrate_mode" => "vbr",
+                    "qp_i_max" => MEDIACODEC_QP_MAX,
+                    "qp_p_max" => MEDIACODEC_QP_MAX,
+                    "qp_b_max" => MEDIACODEC_QP_MAX,
+                };
+                // Gold standard: pin profile/level for 4K so phone chips
+                // accept the export - H.264 High@5.1 / HEVC Main@5.1 for
+                // 3840x2160 and up; matches Android hardware decoder
+                // profileLevels reported by MediaCodecInfo (#1[1][2]).
+                if u64::from(width) * u64::from(height) >= 3840 * 2160 {
+                    match options.codec {
+                        VideoCodec::H264 => {
+                            settings.set("profile", "high");
+                            settings.set("level", "5.1");
+                        }
+                        VideoCodec::Hevc => {
+                            settings.set("profile", "main");
+                            settings.set("level", "5.1");
+                        }
+                        _ => {}
+                    }
+                }
+                settings
+            }
             // The chip's own rate control, whatever it is.
             Attempt::Plain => ffmpeg::Dictionary::new(),
             Attempt::Component(component) => ffmpeg::dict! {
