@@ -1016,8 +1016,20 @@ impl WgpuCompositor {
             backends,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         };
+        // Runtime escape hatch: WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1
+        // lets users enable non-compliant Vulkan adapters (Mali/PanVK etc.)
+        // without rebuilding - wgpu-hal hides adapters reporting
+        // conformance_version.major == 0 unless this flag is set (issue #20).
+        let mut flags = wgpu::InstanceFlags::default();
+        if std::env::var("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            flags |= wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+        }
+        descriptor.flags = flags;
         if allow_noncompliant {
-            descriptor.flags = wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+            descriptor.flags |= wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
         }
         // FXC, never wgpu's default `Auto`: Concat ships no dxcompiler.dll,
         // so `Auto` loads whichever one Windows finds on PATH - Obsidian's or
