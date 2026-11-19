@@ -1,5 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">CapCraft</string>
+    <string name="app_name" translatable="false">CapCraft</string>
     <string name="share_label">Edit in CapCraft</string>
+
+    <!-- the export, while it runs -->
+    <string name="exporting">Exporting video</string>
+    <string name="export_percent">%1$d%%</string>
+    <string name="export_cancel">Cancel</string>
+    <string name="export_cancelling">Cancelling…</string>
+    <string name="export_channel">Exports</string>
+    <string name="export_saved">Saved to your device</string>
+    <string name="export_saved_pictures">Saved to Pictures</string>
+    <string name="export_failed">Export failed</string>
+    <string name="action_retry">Try again</string>
+    <string name="export_done">Done</string>
+    <string name="export_new_project">New project</string>
+    <string name="export_leave_tip">You can leave CapCraft while the video saves</string>
+    <string name="export_report">Where the time went</string>
+
+    <!-- a read of the phone that came back with nothing it was asked for -->
+    <string name="home_unreadable">Your projects could not be opened</string>
+    <string name="media_unreadable">Could not read your videos and photos</string>
+
+    <!-- what an icon-only button does, for a screen reader -->
+    <string name="action_clear_search">Clear search</string>
+    <string name="action_no_colour">No colour</string>
+    <string name="tab_files">Files</string>
+    <string name="tab_saved">Saved</string>
 </resources>

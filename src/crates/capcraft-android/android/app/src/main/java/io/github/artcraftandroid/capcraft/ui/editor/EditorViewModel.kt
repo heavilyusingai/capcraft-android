@@ -110,6 +110,14 @@ private const val BEATS = "capcraftBeats"
 /** The app's settings file, and the linkage switch in it. */
 private const val SETTINGS = "capcraft-settings"
 private const val LINKAGE_KEY = "linkage"
+/** Last-used export resolution (480, 720, 1080, 1440, 2160), kept per phone. */
+private const val EXPORT_RESOLUTION_KEY = "exportResolution"
+/** Last-used export frame rate (24, 25, 30, 50, 60), kept per phone. */
+private const val EXPORT_FPS_KEY = "exportFps"
+/** Last-used export bitrate, megabits a second, or -1 for "suggested". */
+private const val EXPORT_MBPS_KEY = "exportMbps"
+/** Last-used export codec: true for HEVC, false for H.264, kept per phone. */
+private const val EXPORT_HEVC_KEY = "exportHevc"
 
 /** Where the timeline keeps its linkage note (the bridge's `LINKAGE`). */
 private const val LINKAGE_EXTRA = "capcraftLinkage"
@@ -574,22 +582,71 @@ class EditorViewModel(app: Application, val path: String) : AndroidViewModel(app
     var scrubbedAt = 0L
         private set
 
-    /** Moves the playhead (scrubbing): playback stops, the player follows. */
+    /** Last playhead value committed to Compose state during a drag, so we don't recompose every pixel. */
+    @Volatile private var lastCommittedScrub = 0L
+
+    /** Nanoseconds between committed playhead updates while dragging: 60 fps cap. */
+    private const val SCRUB_COMMIT_INTERVAL_NS = 16_000_000L
+
+    /** Moves the playhead (scrubbing): playback stops, the player follows.
+     *
+     * During a drag, playhead state is committed at most every [SCRUB_COMMIT_INTERVAL_NS]
+     * so the UI doesn't recompose on every pixel. The final position is always committed
+     * via [commitScrub] when the drag ends.
+     */
     fun scrub(to: Long) {
         scrubbedAt = android.os.SystemClock.uptimeMillis()
         if (playing) stop()
         val end = timeline?.durationUs ?: 0L
-        playhead = to.coerceIn(0L, end.coerceAtLeast(0L))
+        val clamped = to.coerceIn(0L, end.coerceAtLeast(0L))
+        // Throttle Compose state commits to 60 fps while dragging; the engine still
+        // seeks on every call for responsive preview, but the UI only repaints periodically.
+        val now = System.nanoTime()
+        if (now - lastCommittedScrub >= SCRUB_COMMIT_INTERVAL_NS) {
+            lastCommittedScrub = now
+            playhead = clamped
+            viewModelScope.launch(Threads.commands) { runCatching { seek(playhead) } }
+        }
+    }
+
+    /** Commits the pending scrub position to Compose state - called when the drag ends. */
+    fun commitScrub(to: Long) {
+        val end = timeline?.durationUs ?: 0L
+        val clamped = to.coerceIn(0L, end.coerceAtLeast(0L))
+        playhead = clamped
+        lastCommittedScrub = System.nanoTime()
         viewModelScope.launch(Threads.commands) { runCatching { seek(playhead) } }
     }
 
     /** The export settings (the top bar's chip shows the resolution). */
-    var exportResolution: Int? by mutableStateOf(null)
-    var exportFps by mutableStateOf(30)
+    var exportResolution: Int? by mutableStateOf(
+        app.getSharedPreferences(SETTINGS, android.content.Context.MODE_PRIVATE).getInt(EXPORT_RESOLUTION_KEY, null)
+    )
+    var exportFps by mutableStateOf(
+        app.getSharedPreferences(SETTINGS, android.content.Context.MODE_PRIVATE).getInt(EXPORT_FPS_KEY, 30)
+    )
     /** The bitrate chosen, megabits a second, or null for the one suggested for the video. */
-    var exportMbps: Int? by mutableStateOf(null)
+    var exportMbps: Int? by mutableStateOf(
+        app.getSharedPreferences(SETTINGS, android.content.Context.MODE_PRIVATE)
+            .getInt(EXPORT_MBPS_KEY, -1)
+            .takeIf { it >= 0 }
+    )
+    /** H.265 rather than H.264: about three fifths the bitrate for the same 4K picture. */
+    var exportHevc by mutableStateOf(
+        app.getSharedPreferences(SETTINGS, android.content.Context.MODE_PRIVATE).getBoolean(EXPORT_HEVC_KEY, false)
+    )
     /** The export settings sheet is down. */
     var exportSheet by mutableStateOf(false)
+
+    /** Persists the last-used export settings so the sheet reopens as the user left it. */
+    private fun saveExportSettings() {
+        val prefs = app.getSharedPreferences(SETTINGS, android.content.Context.MODE_PRIVATE).edit()
+        exportResolution?.let { prefs.putInt(EXPORT_RESOLUTION_KEY, it) }
+        prefs.putInt(EXPORT_FPS_KEY, exportFps)
+        exportMbps?.let { prefs.putInt(EXPORT_MBPS_KEY, it) } ?: prefs.remove(EXPORT_MBPS_KEY)
+        prefs.putBoolean(EXPORT_HEVC_KEY, exportHevc)
+        prefs.apply()
+    }
     /** The export makes a GIF rather than a video. */
     var exportGif by mutableStateOf(false)
     /** The export a still of the frame under the playhead, as a picture, rather than a video or GIF. */

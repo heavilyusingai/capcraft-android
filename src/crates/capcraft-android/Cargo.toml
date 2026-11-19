@@ -41,8 +41,15 @@ uniffi = { version = "=0.32.2", default-features = false }
 # Isolate voice (src/voice.rs): k2-fsa's speech denoiser, through the bindings
 # concat-speech already links (Apache-2.0), linked the same way it does: the
 # static library on the desktop Unixes, the shared one on the phones.
-[target.'cfg(not(any(windows, target_os = "android", target_os = "ios")))'.dependencies]
+[target.'cfg(not(any(windows, target_os = "android", target_os = "ios", target_os = "linux")))'.dependencies]
 sherpa-onnx = "1.13"
+
+# Linux takes the shared library, as the phones do, because the static one
+# cannot be linked there: its bundled protobuf collides with the static ONNX
+# Runtime the cutout models bring. See concat-speech's manifest for the whole
+# of it. The bindings are the same either way; only the archive differs.
+[target.'cfg(target_os = "linux")'.dependencies]
+sherpa-onnx = { version = "1.13", default-features = false, features = ["shared"] }
 
 [target.'cfg(any(windows, target_os = "android", target_os = "ios"))'.dependencies]
 sherpa-onnx = { version = "1.13", default-features = false, features = ["shared"] }

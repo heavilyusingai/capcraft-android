@@ -16,6 +16,9 @@
     <!-- an export going on with the app in the background, its progress in a notification -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- mediaProcessing is the Android 15+ (API 35+) foreground service type for
+         time-consuming media work such as transcoding; dataSync covers API 34 and below. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -34,6 +37,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="portrait"
+            android:supportsPictureInPicture="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -44,6 +48,16 @@
                 <action android:name="android.intent.action.SEND" />
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <!-- the same, for a video or photo opened from Files, Gallery or a download: "Open with"
+                 is the one route a share sheet does not cover -->
+            <intent-filter android:label="@string/share_label">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
                 <data android:mimeType="video/*" />
                 <data android:mimeType="image/*" />
             </intent-filter>
@@ -62,6 +76,6 @@
         <service
             android:name=".engine.ExportService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|mediaProcessing" />
     </application>
 </manifest>

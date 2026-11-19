@@ -12,6 +12,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.minimumTouchTargetSize
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -174,6 +175,7 @@ fun Dock(vm: EditorViewModel) {
                         .size(32.dp, 58.dp)
                         .clip(RoundedCornerShape(5.dp))
                         .background(Palette.DockBack)
+                        .minimumTouchTargetSize()
                         .clickable {
                             when {
                                 choosing -> vm.chosen = null
@@ -229,6 +231,7 @@ private fun ToolItem(tool: Tool, width: androidx.compose.ui.unit.Dp = 60.dp) {
         Modifier
             .width(width)
             .fillMaxHeight()
+            .minimumTouchTargetSize()
             .clickable(enabled = tool.enabled, onClick = tool.action)
             .padding(top = 13.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -667,7 +670,7 @@ fun ToolSearch(vm: EditorViewModel, onClose: () -> Unit) {
                                 Text("00:%02d".format(kotlin.math.ceil(seconds).toInt()), style = Type.Small.copy(fontSize = 12.sp, color = Palette.TextSecondary))
                             }
                             Box(
-                                Modifier.size(36.dp).clip(androidx.compose.foundation.shape.CircleShape).background(Color(0xFF3A3A3A)).clickable {
+                                Modifier.size(36.dp).clip(androidx.compose.foundation.shape.CircleShape).background(Color(0xFF3A3A3A)).minimumTouchTargetSize().clickable {
                                     io.github.artcraftandroid.capcraft.ui.editor.panels.addSoundFx(vm, name, scope)
                                     onClose()
                                 },

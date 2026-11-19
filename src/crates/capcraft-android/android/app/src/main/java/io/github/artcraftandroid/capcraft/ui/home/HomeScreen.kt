@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.layout.WindowInsets
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -65,11 +66,14 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.artcraftandroid.capcraft.R
 import io.github.artcraftandroid.capcraft.core.ProjectSummary
 import io.github.artcraftandroid.capcraft.core.createProject
 import io.github.artcraftandroid.capcraft.core.deleteProject
@@ -216,9 +220,13 @@ fun HomeScreen(
     shared: List<Uri>,
     consumeShared: () -> Unit,
     open: (path: String, incoming: List<Uri>, then: String?) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     var projects by remember { mutableStateOf<List<ProjectSummary>?>(null) }
+    // Why the library could not be read, when it could not. Without this a failed read looks exactly
+    // like a phone with no projects on it, which is the one thing the user must not be told by mistake.
+    var libraryError by remember { mutableStateOf<String?>(null) }
     var refresh by remember { mutableStateOf(0) }
     var menuFor by remember { mutableStateOf<ProjectSummary?>(null) }
     var renaming by remember { mutableStateOf<ProjectSummary?>(null) }
@@ -248,8 +256,13 @@ fun HomeScreen(
     }
 
     LaunchedEffect(refresh) {
-        projects = withContext(Threads.commands) { runCatching { listProjects() }.getOrDefault(emptyList()) }
-        trash = withContext(Threads.commands) { runCatching { listTrash() }.getOrDefault(emptyList()) }
+        // The Trash is the same read as the library, one folder along: either failing is the same thing
+        // being said, so either one says it.
+        val listed = withContext(Threads.commands) { runCatching { listProjects() } }
+        val binned = withContext(Threads.commands) { runCatching { listTrash() } }
+        listed.onSuccess { projects = it }.onFailure { projects = projects ?: emptyList() }
+        binned.onSuccess { trash = it }
+        libraryError = (listed.exceptionOrNull() ?: binned.exceptionOrNull())?.userMessage
     }
 
     // Light bars over the light pages, light icons over the picture at the top of Edit and over the
@@ -346,7 +359,8 @@ fun HomeScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Home.Background)) {
+    Box(modifier.then(Modifier.fillMaxSize().background(Home.Background)
+        .padding(WindowInsets.systemGestures))) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (tab) {
@@ -395,6 +409,8 @@ fun HomeScreen(
                         showingTrash = showingTrash,
                         onShowTrash = { showingTrash = it; managing = null },
                         onTrashMenu = { trashMenu = it },
+                        error = libraryError,
+                        onRetry = { refresh++ },
                     )
                     else -> MeTab(onLicences = { licences = true }, onAbout = { about = true }, onCleared = { message = it })
                 }
@@ -599,7 +615,7 @@ private fun EditTab(
                         Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onShortcut(s) }.padding(vertical = 22.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Glyph(s.icon, Home.Ink, size = 26.dp)
+                        Glyph(s.icon, Home.Ink, size = 26.dp, description = s.label)
                         Spacer(Modifier.height(10.dp))
                         Text(s.label, style = ink(13f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
@@ -750,6 +766,9 @@ private fun ProjectsTab(
     showingTrash: Boolean,
     onShowTrash: (Boolean) -> Unit,
     onTrashMenu: (ProjectSummary) -> Unit,
+    /** Why the library could not be read, or null when it was. */
+    error: String? = null,
+    onRetry: () -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     // All, Video and Photo, as the reference's chips sort its projects
@@ -821,6 +840,7 @@ private fun ProjectsTab(
                 )
                 val bin = trash
                 when {
+                    bin == null && error != null -> ReadError(error, onRetry)
                     bin == null -> Unit
                     bin.isEmpty() -> Box(Modifier.fillMaxWidth().padding(top = 96.dp), contentAlignment = Alignment.Center) {
                         Text("The Trash is empty", style = ink(14f, color = Home.Muted))
@@ -856,6 +876,8 @@ private fun ProjectsTab(
                 shown == null -> Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Palette.Accent, modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
                 }
+                // A read that failed is not an empty shelf: say what happened and offer the one action.
+                error != null && shown.isEmpty() -> ReadError(error, onRetry)
                 shown.isEmpty() -> Box(Modifier.fillMaxWidth().padding(top = 96.dp), contentAlignment = Alignment.Center) {
                     Text(if (searching && query.isNotBlank()) "No projects found" else "No projects yet", style = ink(14f, color = Home.Muted))
                 }
@@ -898,6 +920,22 @@ private fun ProjectsTab(
 
 /** Whether [p] was made as a photo (Edit photo, Smart lighting, a collage of photos). */
 private fun isPhoto(p: ProjectSummary) = java.io.File(p.path, io.github.artcraftandroid.capcraft.ui.editor.PHOTO_MARK).exists()
+
+/** A read of the library that failed, in the place the shelf would have been. */
+@Composable
+private fun ReadError(reason: String, onRetry: () -> Unit) {
+    Box(Modifier.fillMaxWidth().padding(top = 96.dp, start = 32.dp, end = 32.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(stringResource(R.string.home_unreadable), style = ink(15f, FontWeight.Medium))
+            Spacer(Modifier.height(6.dp))
+            Text(reason, style = ink(13f, color = Home.Muted), textAlign = TextAlign.Center)
+            Spacer(Modifier.height(14.dp))
+            Box(
+                Modifier.clip(RoundedCornerShape(8.dp)).background(Home.Round).clickable(onClick = onRetry).padding(horizontal = 20.dp, vertical = 10.dp),
+            ) { Text(stringResource(R.string.action_retry), style = ink(14f, FontWeight.Medium)) }
+        }
+    }
+}
 
 @Composable
 private fun ProjectRow(p: ProjectSummary, ticked: Boolean?, onOpen: () -> Unit, onMenu: () -> Unit) {
@@ -1320,7 +1358,7 @@ private fun RenameSheet(current: String, onDismiss: () -> Unit, onDone: (String)
                 if (text.text.isNotEmpty()) {
                     Box(Modifier.size(34.dp).clickable { text = androidx.compose.ui.text.input.TextFieldValue("") }, contentAlignment = Alignment.Center) {
                         Box(Modifier.size(18.dp).clip(RoundedCornerShape(9.dp)).background(Home.Ring), contentAlignment = Alignment.Center) {
-                            Glyph(LucideIcons.X, Color.White, size = 12.dp)
+                            Glyph(LucideIcons.X, Color.White, size = 12.dp, description = stringResource(R.string.action_clear_search))
                         }
                     }
                 }

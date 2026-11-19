@@ -127,8 +127,7 @@ fun AudioEffectsPanel(vm: EditorViewModel) {
             if (query.isBlank()) {
                 item { SoundTile("Original", current == null, bold = true) { apply(null) } }
             }
-            items(shown.size) { i ->
-                val p = shown[i]
+            items(shown, key = { it.id }) { p ->
                 SoundTile(p.name, current == p.id) { apply(p.id) }
             }
         }

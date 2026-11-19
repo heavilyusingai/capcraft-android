@@ -47,8 +47,20 @@ whisper-rs = { version = "0.16", features = ["raw-api"] }
 
 # Text to speech: the official k2-fsa bindings. Linked statically on the
 # desktop Unixes, so the binary carries no extra dylibs.
-[target.'cfg(not(any(windows, target_os = "android", target_os = "ios")))'.dependencies]
+[target.'cfg(not(any(windows, target_os = "android", target_os = "ios", target_os = "linux")))'.dependencies]
 sherpa-onnx = "1.13"
+
+# On Linux it is the shared library too, for a reason that is not packaging:
+# sherpa-onnx's static archive carries its own copy of protobuf, and so does
+# the static ONNX Runtime that concat-vision's models link. Two archives, one
+# set of symbols - Status::Status(), OkStatus(), the locale helpers - and
+# rust-lld refuses the link with "duplicate symbol" on the first of several
+# hundred. The app has both (speech for Kokoro, vision for cutouts), so the
+# static pair cannot be built at all. Linking sherpa the way Android and
+# Windows already do keeps protobuf inside libsherpa-onnx-c-api.so, where it
+# cannot collide, and the sys crate's build script sets the rpath.
+[target.'cfg(target_os = "linux")'.dependencies]
+sherpa-onnx = { version = "1.13", default-features = false, features = ["shared"] }
 
 # Elsewhere it is the shared library.
 #

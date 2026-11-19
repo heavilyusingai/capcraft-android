@@ -103,6 +103,8 @@ pub(crate) struct Context {
     pub monitor: concat_host::preview::Monitor,
     /// The one export that may run at a time.
     pub exporter: concat_host::export::Exporter,
+    /// What the last export measured, kept so the next one can estimate from it.
+    pub last_export: Mutex<Option<concat_export::profile::ExportProfile>>,
     /// Sound, once started.
     pub playback: Mutex<Option<std::sync::Arc<concat_host::playback::Playback>>>,
 }
@@ -163,6 +165,7 @@ pub fn init(files_dir: String, cache_dir: String) -> Result<(), MobileError> {
         titles,
         monitor: concat_host::preview::Monitor::new(),
         exporter: concat_host::export::Exporter::new(),
+        last_export: Mutex::new(None),
         playback: Mutex::new(None),
     });
     log::info!(
