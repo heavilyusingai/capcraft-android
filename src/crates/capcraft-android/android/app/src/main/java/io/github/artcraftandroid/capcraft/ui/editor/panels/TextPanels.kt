@@ -62,9 +62,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.artcraftandroid.capcraft.R
 import io.github.artcraftandroid.capcraft.engine.Threads
 import io.github.artcraftandroid.capcraft.ui.Glyph
 import io.github.artcraftandroid.capcraft.ui.LucideIcons
@@ -1615,7 +1617,7 @@ internal fun SwatchRow(selected: String?, allowNone: Boolean = false, vm: Editor
                     .then(if (selected == null) Modifier.border(2.dp, Palette.Text, CircleShape) else Modifier)
                     .clickable { onPick(null) },
                 contentAlignment = Alignment.Center,
-            ) { Glyph(LucideIcons.CircleX, Palette.TextSecondary, size = 16.dp) }
+            ) { Glyph(LucideIcons.CircleX, Palette.TextSecondary, size = 16.dp, description = stringResource(R.string.action_no_colour)) }
         }
         if (vm != null) {
             val picking = vm.pickColor != null

@@ -8,10 +8,13 @@
 //! the quality, and the one export that can run at a time reports through a
 //! callback and stops through a flag.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, PoisonError};
 
+use concat_export::profile;
+pub use concat_export::profile::ExportProfile;
 use concat_export::{ExportClip, ExportRequest, Reporter, render_on};
+pub use concat_export::plan::{Estimate, estimate_request, fits, free_bytes};
 pub use concat_media::{ColorRange, RateMode, VideoCodec};
 pub use concat_render::WgpuCompositor;
 
@@ -110,8 +113,26 @@ pub fn run_on(
     request: &ExportRequest,
     compositor: Option<WgpuCompositor>,
     cancel: &AtomicBool,
-    mut progress: impl FnMut(Progress),
+    progress: impl FnMut(Progress),
 ) -> Result<String, String> {
+    run_profiled(request, compositor, cancel, progress).0
+}
+
+/// [`run_on`], measuring where the time went as it goes: the result, and
+/// the profile the export filled on its way - filled even when the export
+/// failed, which is when it is most worth reading.
+///
+/// The profile is `concat-export`'s ([`ExportProfile`]): the wall time each
+/// stage took, the frames and layers that went through it, the cut's four
+/// quarters, and the encoder that wrote the file. It costs the export one
+/// clock read a stage and nothing when the caller does not want it.
+pub fn run_profiled(
+    request: &ExportRequest,
+    compositor: Option<WgpuCompositor>,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(Progress),
+) -> (Result<String, String>, ExportProfile) {
+    let measured = profile::shared();
     let mut report = |frame: i64, total: i64, stage: &'static str| {
         progress(Progress {
             frame,
@@ -119,14 +140,16 @@ pub fn run_on(
             stage,
         });
     };
-    render_on(
+    let result = render_on(
         request,
         compositor,
-        Reporter {
-            progress: &mut report,
-            cancel,
-        },
-    )
+        Reporter::new(&mut report, cancel).profiling(Arc::clone(&measured)),
+    );
+    let profile = measured
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    (result, profile)
 }
 
 /// The slot for the one export that can run at a time - enforced, not

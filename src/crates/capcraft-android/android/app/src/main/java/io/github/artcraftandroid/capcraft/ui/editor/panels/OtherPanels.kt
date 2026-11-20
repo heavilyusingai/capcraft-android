@@ -47,9 +47,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import io.github.artcraftandroid.capcraft.R
 import io.github.artcraftandroid.capcraft.engine.Media
 import io.github.artcraftandroid.capcraft.engine.clock
 import io.github.artcraftandroid.capcraft.ui.Glyph
@@ -613,7 +615,7 @@ fun BackgroundPanel(vm: EditorViewModel, tab: Int) {
                     Box(
                         Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF3A3A3A)).clickable { set(null) },
                         contentAlignment = Alignment.Center,
-                    ) { Glyph(LucideIcons.CircleSlash, Palette.DockText, size = 18.dp) }
+                    ) { Glyph(LucideIcons.CircleSlash, Palette.DockText, size = 18.dp, description = stringResource(R.string.action_no_colour)) }
                     Box(Modifier.padding(horizontal = 12.dp).size(1.dp, 24.dp).background(Color(0xFF4A4A4A)))
                     SWATCHES.forEach { hex ->
                         val on = kind == "color" && current?.optString("color").equals(hex, true)

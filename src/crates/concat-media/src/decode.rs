@@ -442,12 +442,13 @@ impl ColorSignal {
     /// the frames' own where it does not - and BT.709 out, tone-mapped
     /// perceptually rather than clipped. swscale has done this itself
     /// since FFmpeg 7.1, so it costs no library the bundles lack.
-    fn bt709_args(self) -> String {
+    fn to_sdr_chain(self) -> String {
         use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic as Transfer};
+        // zscale's vocabulary, which is the only filter that can convert
+        // primaries and transfer at all: swscale's `scale` reads neither.
         let primaries = match self.primaries {
             Primaries::BT2020 => "bt2020",
             Primaries::BT709 => "bt709",
-            Primaries::SMPTE432 => "smpte432",
             _ => "auto",
         };
         let transfer = match self.transfer {
@@ -469,10 +470,14 @@ impl ColorSignal {
             Range::JPEG => "pc",
             _ => "auto",
         };
+        // The documented tone-mapping shape, and the only one that is
+        // correct: into linear light at a reference white (npl=100 is the
+        // nominal peak of an SDR display), out of the wide gamut into
+        // BT.709 while still float, a curve onto the SDR dynamic range,
+        // and then back to video levels for the eight-bit tail.
         format!(
-            ":in_primaries={primaries}:in_transfer={transfer}:in_color_matrix={matrix}\
-             :in_range={range}:out_primaries=bt709:out_transfer=bt709\
-             :out_color_matrix=bt709:out_range=tv:intent=perceptual"
+            "zscale=tin={transfer}:min={matrix}:pin={primaries}:rin={range}:t=linear:npl=100,\
+             format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv"
         )
     }
 
@@ -495,10 +500,16 @@ impl ColorSignal {
     /// transfer are left as they are, for the GPU to convert.
     fn native_args(self) -> String {
         use ffmpeg::color::{Range, Space};
+        // `scale` reads a matrix but knows only five of them, and the
+        // constant-luminance variant of BT.2020 is not one: swscale has no
+        // CL kernel, so both 2020 forms convert as the non-constant matrix
+        // and the GPU's own conversion, which follows, is what decides.
+        // (The values this used to emit - `bt2020nc`, `bt2020c` - are
+        // zscale's names, and `scale` refused every one of them: an HLG
+        // source failed to decode with "Invalid argument".)
         let matrix = match self.matrix {
-            Space::BT2020CL => "bt2020c",
             Space::BT709 => "bt709",
-            _ => "bt2020nc",
+            _ => "bt2020",
         };
         let range = match self.range {
             Range::JPEG => "pc",
@@ -548,15 +559,18 @@ fn video_filter(
     // of a tag is named only when it is full: the frames carry no tag for
     // swscale to read, and untagged already means limited to it.
     let deep = deep_output(options, color);
-    let convert = match (color, options.color_range) {
-        (Some(signal), _) if deep.is_some() => signal.native_args(),
-        (Some(signal), _) if signal.is_wide() => signal.bt709_args(),
-        (_, Some(range)) => format!(":in_range={}", range.scale_name()),
+    let (tone_map, convert) = match (color, options.color_range) {
+        (Some(signal), _) if deep.is_some() => (None, signal.native_args()),
+        (Some(signal), _) if signal.is_wide() => (Some(signal.to_sdr_chain()), String::new()),
+        (_, Some(range)) => (None, format!(":in_range={}", range.scale_name())),
         (Some(signal), None) if signal.implied && signal.range == ffmpeg::color::Range::JPEG => {
-            ":in_range=pc".to_owned()
+            (None, ":in_range=pc".to_owned())
         }
-        _ => String::new(),
+        _ => (None, String::new()),
     };
+    if let Some(chain) = tone_map {
+        parts.push(chain);
+    }
     parts.push(format!("scale={width}:{height}:flags=bilinear{convert}"));
     if let Some(chain) = &options.filter_chain {
         parts.push(chain.clone());
@@ -1806,8 +1820,18 @@ mod tests {
         };
         assert!(hdr.is_wide() && hdr.is_hdr());
         let spec = video_filter(0, &options, 640, 360, Some(&hdr));
-        assert!(spec.starts_with("scale=640:360:flags=bilinear:in_primaries=bt2020:in_transfer=smpte2084:in_color_matrix=bt2020nc:in_range=tv:out_primaries=bt709"), "{spec}");
-        assert!(spec.contains("intent=perceptual,format=rgba"), "{spec}");
+        // The tone map is its own stage now, and it has to be: swscale's
+        // `scale` has no primaries or transfer option at all, so the old
+        // graph asking it for in_primaries/in_transfer/intent was refused
+        // whole - "Invalid argument" - and no HDR file decoded.
+        assert!(
+            spec.starts_with(
+                "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:rin=tv:t=linear:npl=100,\
+                 format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,\
+                 zscale=t=bt709:m=bt709:r=tv,scale=640:360:flags=bilinear,format=rgba"
+            ),
+            "{spec}"
+        );
         // wide gamut with an SDR curve converts too, and the untagged
         // half of it is left to the frames
         let wide = ColorSignal {
@@ -1818,9 +1842,10 @@ mod tests {
             implied: false,
         };
         assert!(wide.is_wide() && !wide.is_hdr());
+        let wide_spec = video_filter(0, &options, 64, 64, Some(&wide));
         assert!(
-            video_filter(0, &options, 64, 64, Some(&wide))
-                .contains(":in_transfer=auto:in_color_matrix=auto:in_range=auto:")
+            wide_spec.starts_with("zscale=tin=auto:min=auto:pin=bt2020:rin=auto:t=linear:npl=100,"),
+            "{wide_spec}"
         );
     }
 
@@ -1946,8 +1971,8 @@ mod tests {
             implied: false,
         };
         assert!(
-            video_filter(0, &full, 640, 360, Some(&hdr_full)).contains(":in_range=pc:"),
-            "a wide picture carries the range among its conversion terms"
+            video_filter(0, &full, 640, 360, Some(&hdr_full)).contains("rin=pc:"),
+            "a wide picture carries the range into the tone map's own terms"
         );
         assert_eq!(ColorRange::parse("PC"), Some(ColorRange::Full));
         assert_eq!(ColorRange::parse("video"), Some(ColorRange::Limited));

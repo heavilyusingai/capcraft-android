@@ -10,3 +10,5 @@ local.properties
 .gradle/
 .kotlin/
 build/
+# Google Drive sync - downloaded patches and reference docs, not source
+google_drive/

@@ -23,3 +23,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "CapCraft"
 include(":app")
+include(":baselineprofile")

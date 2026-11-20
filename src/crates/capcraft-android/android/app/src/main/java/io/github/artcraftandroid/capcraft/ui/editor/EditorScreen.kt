@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.text.drawText
@@ -34,6 +36,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -42,6 +45,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.WindowInsets
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -79,12 +83,39 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 @Composable
-fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close: () -> Unit) {
+fun EditorScreen(
+    path: String,
+    incoming: List<Uri>,
+    then: String? = null,
+    /** Media shared to the app while this project is open; [consumeShared] clears it. */
+    shared: List<Uri> = emptyList(),
+    consumeShared: () -> Unit = {},
+    close: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val app = LocalContext.current.applicationContext as Application
     val vm: EditorViewModel = viewModel(key = path, factory = EditorViewModel.Factory(app, path))
     val scope = rememberCoroutineScope()
     var exporting by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(vm.message) {
+        if (vm.message.isNotNull() && (vm.message.startsWith("Undo: ") || vm.message.startsWith("Redo: "))) {
+            snackbarHostState.showSnackbar(vm.message!!)
+            vm.message = null
+        }
+    }
     LaunchedEffect(Unit) { vm.open(incoming, then) }
+    // A share that arrives while a project is open joins that project, at the end of its track: the
+    // alternative is what used to happen, a second project appearing once the user went Home.
+    // The engine opens the project on its own thread, so a share that arrives before it has opened
+    // waits for the timeline rather than being dropped on a session that is not there yet.
+    val opened = vm.timeline != null
+    LaunchedEffect(shared, opened) {
+        if (opened && shared.isNotEmpty()) {
+            vm.addToMain(shared, atEnd = true)
+            consumeShared()
+        }
+    }
     // the picker marks what this project holds already
     androidx.compose.runtime.DisposableEffect(path) {
         io.github.artcraftandroid.capcraft.ui.common.MediaPick.project = path
@@ -152,7 +183,8 @@ fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close:
     // how far above the screen's foot the preview ends: a notice shows just above it, as the reference's do
     var belowPreview by remember { mutableStateOf(0f) }
     val density = androidx.compose.ui.platform.LocalDensity.current
-    Box(Modifier.fillMaxSize().background(Palette.EditorTop)) {
+    Box(modifier.then(Modifier.fillMaxSize().background(Palette.EditorTop)
+        .padding(WindowInsets.systemGestures))) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             TopBar(vm = vm, onClose = ::leave, onExport = ::export)
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
@@ -189,6 +221,7 @@ fun EditorScreen(path: String, incoming: List<Uri>, then: String? = null, close:
         if (exporting) {
             ExportScreen(vm, onClose = { exporting = false }, onHome = { exporting = false; leave() })
         }
+        SnackbarHost(hostState = snackbarHostState)
         Toast(vm.message, bottom = with(density) { belowPreview.toDp() } + 28.dp) { vm.message = null }
     }
 }
@@ -541,7 +574,12 @@ private fun FullscreenPreview(vm: EditorViewModel) {
 @Composable
 private fun Scrubber(vm: EditorViewModel) {
     val end = (vm.timeline?.durationUs ?: 0L).coerceAtLeast(1L)
-    val fraction = (vm.playhead.toFloat() / end).coerceIn(0f, 1f)
+    // derivedStateOf: recomposes only when fraction actually flips, not on every playhead pixel.
+    val fraction by remember {
+        derivedStateOf {
+            (vm.playhead.toFloat() / end).coerceIn(0f, 1f)
+        }
+    }
     androidx.compose.foundation.Canvas(
         Modifier.fillMaxWidth().height(32.dp).pointerInput(end) {
             val r = 8.dp.toPx()
@@ -552,7 +590,11 @@ private fun Scrubber(vm: EditorViewModel) {
                 while (true) {
                     val e = awaitPointerEvent()
                     val c = e.changes.firstOrNull { it.id == down.id } ?: break
-                    if (!c.pressed) break
+                    if (!c.pressed) {
+                        // drag ended: commit final position so the UI shows the exact frame
+                        vm.commitScrub((at(c.position.x) * end).toLong())
+                        break
+                    }
                     vm.scrub((at(c.position.x) * end).toLong())
                     c.consume()
                 }
