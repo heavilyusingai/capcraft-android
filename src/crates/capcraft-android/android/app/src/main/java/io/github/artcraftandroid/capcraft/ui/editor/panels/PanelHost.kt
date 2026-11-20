@@ -55,10 +55,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.artcraftandroid.capcraft.R
 import io.github.artcraftandroid.capcraft.core.RowKind
 import io.github.artcraftandroid.capcraft.ui.Glyph
 import io.github.artcraftandroid.capcraft.ui.LucideIcons
@@ -419,7 +421,7 @@ fun ChoiceGrid(count: Int, modifier: Modifier = Modifier, item: @Composable (Int
         verticalArrangement = Arrangement.spacedBy(12.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(count) { item(it) }
+        items(count, key = { it }) { item(it) }
     }
 }
 
@@ -1160,7 +1162,7 @@ internal fun SearchField(value: String, onChange: (String) -> Unit, hint: String
         }
         if (value.isNotEmpty()) {
             Box(Modifier.size(28.dp).clickable { onChange("") }, contentAlignment = Alignment.Center) {
-                Glyph(LucideIcons.X, Palette.TextSecondary, size = 16.dp)
+                Glyph(LucideIcons.X, Palette.TextSecondary, size = 16.dp, description = stringResource(R.string.action_clear_search))
             }
         }
     }

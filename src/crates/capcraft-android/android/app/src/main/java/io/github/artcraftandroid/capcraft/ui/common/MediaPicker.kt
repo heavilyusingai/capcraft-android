@@ -61,10 +61,12 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import io.github.artcraftandroid.capcraft.R
 import io.github.artcraftandroid.capcraft.ui.Glyph
 import io.github.artcraftandroid.capcraft.ui.LucideIcons
 import io.github.artcraftandroid.capcraft.ui.Palette
@@ -252,7 +254,15 @@ private fun MediaPickerPage(req: MediaRequest, onClose: () -> Unit, onDone: (Lis
         partial = limited(context)
         reads++
     }
-    val all by produceState<List<Item>?>(null, reads) { value = withContext(Dispatchers.IO) { runCatching { loadMedia(context) }.getOrDefault(emptyList()) } }
+    // A read that fails is not a phone with nothing on it: the difference is the one thing the user
+    // must not be told by mistake, so the failure is kept and offered a way to try again.
+    var unreadable by remember { mutableStateOf(false) }
+    val all by produceState<List<Item>?>(null, reads) {
+        unreadable = false
+        val read = withContext(Dispatchers.IO) { runCatching { loadMedia(context) } }
+        unreadable = read.isFailure
+        value = read.getOrDefault(emptyList())
+    }
     val chosen = remember { mutableStateListOf<Item>() }
     // what the open project holds already, marked on its tiles
     val imported = remember { MediaPick.project?.let { io.github.artcraftandroid.capcraft.engine.Media.imported(it) }.orEmpty() }
@@ -326,6 +336,15 @@ private fun MediaPickerPage(req: MediaRequest, onClose: () -> Unit, onDone: (Lis
         Box(Modifier.fillMaxWidth().weight(1f)) {
             when {
                 all == null -> CircularProgressIndicator(color = Palette.Accent, modifier = Modifier.align(Alignment.Center).size(28.dp), strokeWidth = 2.dp)
+                unreadable -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(stringResource(R.string.media_unreadable), style = Type.Small.copy(color = Palette.TextSecondary))
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        stringResource(R.string.action_retry),
+                        style = Type.Small.copy(color = Palette.Accent, fontWeight = FontWeight.SemiBold),
+                        modifier = Modifier.clickable { reads++ }.padding(10.dp),
+                    )
+                }
                 shown.isEmpty() -> Text(
                     if (videos) "No videos" else "No photos",
                     style = Type.Small.copy(color = Palette.TextSecondary),

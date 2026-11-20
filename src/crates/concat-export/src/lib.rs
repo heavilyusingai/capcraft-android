@@ -23,6 +23,9 @@
 pub mod chains;
 pub mod flatten;
 mod resolve;
+pub mod plan;
+pub mod profile;
+pub mod smart;
 
 use resolve::{
     BuiltTimeline, TransitionSpan, Treatment, animation_of, build_timeline, quantise, quantise_at,
@@ -32,6 +35,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use profile::Stage;
 
 use concat_core::SpeedCurve;
 use concat_core::animate::{Animation, Ease as AnimEase, Key as AnimKey, Track as AnimTrack};
@@ -262,6 +267,65 @@ pub struct ExportClip {
     /// black and for every other clip. See `Timeline::background_of`.
     #[serde(default)]
     pub backdrop: Option<ExportBackdrop>,
+}
+
+impl Default for ExportClip {
+    /// A clip that changes nothing it is given: no effect, no transform, no
+    /// retime, unity volume. The values the flattener writes for a clip the
+    /// user has not touched, so a test - or a caller building a timeline in
+    /// code - can say only what it means.
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            audio_stream: None,
+            color_range: None,
+            kind: ClipKind::Video,
+            start: 0.0,
+            duration: 0.0,
+            source_start: 0.0,
+            track: 0,
+            hidden: false,
+            muted: false,
+            volume: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            filter_chain: String::new(),
+            speed: 1.0,
+            preserve_pitch: true,
+            speed_curve: Vec::new(),
+            speed_slopes: Vec::new(),
+            animation: Vec::new(),
+            flip_h: false,
+            flip_v: false,
+            blend: "normal".to_owned(),
+            crop: None,
+            effects: Vec::new(),
+            transition_shapes: Vec::new(),
+            scale: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            rotation: 0.0,
+            stretch_x: 1.0,
+            stretch_y: 1.0,
+            opacity: 1.0,
+            transition: None,
+            video_fade_in: 0.0,
+            hold: false,
+            media_width: None,
+            media_height: None,
+            overscan: 0.0,
+            media_duration: None,
+            has_audio: None,
+            cutout: None,
+            mask: None,
+            highlighted: false,
+            mask_dir: String::new(),
+            stabilize: None,
+            motion_dir: String::new(),
+            reveal_map: None,
+            backdrop: None,
+        }
+    }
 }
 
 /// A clip's background, resolved for drawing: the document's
@@ -543,9 +607,31 @@ pub struct Reporter<'a> {
     pub progress: &'a mut dyn FnMut(i64, i64, &'static str),
     /// Checked between frames and stages; true aborts cleanly.
     pub cancel: &'a AtomicBool,
+    /// Where the time each stage took is added up, when the caller wants
+    /// to know; see [`profile`].
+    pub profile: Option<profile::SharedProfile>,
 }
 
-impl Reporter<'_> {
+impl<'a> Reporter<'a> {
+    /// A reporter that reports and stops, and measures nothing.
+    pub fn new(
+        progress: &'a mut dyn FnMut(i64, i64, &'static str),
+        cancel: &'a AtomicBool,
+    ) -> Self {
+        Self {
+            progress,
+            cancel,
+            profile: None,
+        }
+    }
+
+    /// The same reporter, adding what each stage takes to `profile`.
+    #[must_use]
+    pub fn profiling(mut self, profile: profile::SharedProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
     fn emit(&mut self, frame: i64, total: i64, stage: &'static str) {
         (self.progress)(frame, total, stage);
     }
@@ -1212,6 +1298,17 @@ pub fn render_on(
         }
     }
 
+    // Where an export's time goes, when the caller asked for it (see
+    // `profile`): the slot the stages add to, and the clock the setup - the
+    // timeline, the decoders, the compositor - is measured from.
+    let profile = reporter.profile.clone();
+    if let Some(slot) = profile.as_ref() {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .output_is(request.width, request.height, rate.fps().as_f64());
+    }
+    let setup_began = std::time::Instant::now();
+
     // Transitions become overlaps, ramps and fade filters before anything
     // else reads the clip list, so the picture and sound paths below never
     // know transitions exist.
@@ -1846,6 +1943,14 @@ fn render_picture(
                 "software"
             }
         );
+        if let Some(slot) = profile.as_ref() {
+            slot.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .encoder_is(encoder.encoder_name(), encoder.on_hardware());
+            slot.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .account(Stage::Setup, setup_began.elapsed());
+        }
 
         // When progress was last said; see `progress_due`.
         let mut said = std::time::Instant::now();
@@ -1860,6 +1965,7 @@ fn render_picture(
         for index in 0..total_frames {
             reporter.cancelled()?;
 
+            let frame_began = profile.as_ref().map(|_| std::time::Instant::now());
             let time = rate.time_of_frame(index);
             let plan = plan_frame(&timeline, time);
 
@@ -1995,17 +2101,28 @@ fn render_picture(
             // that died under it is black, and is drawn again on the device
             // that takes over. Both drawings borrow it - the layers' pictures
             // were never copied, and now their passes are not either.
-            let mut composed = composite_treated(
-                &mut EffectClock {
-                    inner: &mut compositor,
-                    offset: effect_offset,
+            let mut composed = crate::profile::timed(
+                profile.as_ref(),
+                Stage::Composite,
+                || {
+                    composite_treated(
+                        &mut EffectClock {
+                            inner: &mut compositor,
+                            offset: effect_offset,
+                        },
+                        &frame_plan,
+                        &treatments,
+                        &transitions,
+                    )
                 },
-                &frame_plan,
-                &treatments,
-                &transitions,
             );
             while compositor.lost() {
                 losses += 1;
+                if let Some(slot) = profile.as_ref() {
+                    slot.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .lost();
+                }
                 let adapter = compositor.adapter_info();
                 log::error!(
                     "export: the GPU device on {} was lost drawing frame {index} of {total_frames} \
@@ -2014,23 +2131,42 @@ fn render_picture(
                     time.as_f64(),
                 );
                 compositor = recovered(losses, hdr)?;
-                composed = composite_treated(
-                    &mut EffectClock {
-                        inner: &mut compositor,
-                        offset: effect_offset,
+                composed = crate::profile::timed(
+                    profile.as_ref(),
+                    Stage::Composite,
+                    || {
+                        composite_treated(
+                            &mut EffectClock {
+                                inner: &mut compositor,
+                                offset: effect_offset,
+                            },
+                            &frame_plan,
+                            &treatments,
+                            &transitions,
+                        )
                     },
-                    &frame_plan,
-                    &treatments,
-                    &transitions,
                 );
             }
-            if let Err(error) = encoder.write_frame(&composed) {
+            if let Err(error) = crate::profile::timed(
+                profile.as_ref(),
+                Stage::Encode,
+                || encoder.write_frame(&composed),
+            ) {
                 // The stopped encoder is closed before the file is opened
                 // again, so the chip has its session back.
                 drop(encoder);
                 again_in_software(&error, &mut options, index, total_frames)?;
                 reporter.emit(0, total_frames, RENDERING_IN_SOFTWARE);
                 continue 'pass;
+            }
+
+            if let Some(started) = frame_began {
+                if let Some(slot) = profile.as_ref() {
+                    let elapsed = started.elapsed();
+                    slot.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .frame(index, total_frames, plan.layers.len() as u64, elapsed);
+                }
             }
 
             // Retire decoders whose clip has finished, so a long timeline does not
@@ -2044,9 +2180,22 @@ fn render_picture(
             }
         }
 
+        let mux_began = std::time::Instant::now();
         match encoder.finish() {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                if let Some(slot) = profile.as_ref() {
+                    slot.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .account(Stage::Mux, mux_began.elapsed());
+                }
+                return Ok(());
+            }
             Err(error) => {
+                if let Some(slot) = profile.as_ref() {
+                    slot.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .account(Stage::Mux, mux_began.elapsed());
+                }
                 drop(encoder);
                 again_in_software(&error, &mut options, total_frames, total_frames)?;
                 reporter.emit(0, total_frames, RENDERING_IN_SOFTWARE);
@@ -3644,12 +3793,9 @@ mod tests {
             clips: vec![footage],
         };
         assert!(!nested.exists());
-        let cancel = AtomicBool::new(false);
         let mut progress = |_: i64, _: i64, _: &'static str| {};
-        let reporter = Reporter {
-            progress: &mut progress,
-            cancel: &cancel,
-        };
+        let cancel = AtomicBool::new(false);
+        let reporter = Reporter::new(&mut progress, &cancel);
         // Whether or not this machine can draw the frames, the folder is
         // there before the first one is asked for.
         let result = render_on(&request, None, reporter);
@@ -3727,10 +3873,7 @@ mod tests {
         };
         let cancel = AtomicBool::new(false);
         let mut progress = |_: i64, _: i64, _: &'static str| {};
-        let reporter = Reporter {
-            progress: &mut progress,
-            cancel: &cancel,
-        };
+        let reporter = Reporter::new(&mut progress, &cancel);
         let result = render_on(&request, Some(failing), reporter);
         let _ = std::fs::remove_dir_all(&dir);
         result.expect("the export goes on on a fresh device");
@@ -3831,10 +3974,7 @@ mod tests {
         let render = |request: &ExportRequest| {
             let cancel = AtomicBool::new(false);
             let mut progress = |_: i64, _: i64, _: &'static str| {};
-            let reporter = Reporter {
-                progress: &mut progress,
-                cancel: &cancel,
-            };
+            let reporter = Reporter::new(&mut progress, &cancel);
             render_on(request, None, reporter)
         };
 

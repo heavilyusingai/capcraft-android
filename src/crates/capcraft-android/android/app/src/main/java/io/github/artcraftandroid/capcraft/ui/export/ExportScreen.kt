@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -45,14 +46,17 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.artcraftandroid.capcraft.R
 import io.github.artcraftandroid.capcraft.core.ExportListener
 import io.github.artcraftandroid.capcraft.core.ExportSettings
 import io.github.artcraftandroid.capcraft.core.GifSettings
 import io.github.artcraftandroid.capcraft.core.Motion
 import io.github.artcraftandroid.capcraft.core.cancelExport
+import io.github.artcraftandroid.capcraft.core.exportEstimate
 import io.github.artcraftandroid.capcraft.core.exportPath
 import io.github.artcraftandroid.capcraft.core.exportSize
 import io.github.artcraftandroid.capcraft.core.startExport
@@ -80,8 +84,8 @@ import kotlinx.coroutines.withContext
 
 private sealed interface Stage {
     data class Running(val fraction: Float) : Stage
-    data class Done(val uri: Uri?) : Stage
-    data class Failed(val message: String) : Stage
+    data class Done(val uri: Uri?, val report: String?) : Stage
+    data class Failed(val message: String, val report: String?) : Stage
 }
 
 /**
@@ -97,6 +101,8 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
     var progress by remember { mutableFloatStateOf(0f) }
     // a new try after a failure starts the export again
     var attempt by remember { mutableIntStateOf(0) }
+    // where the last export's time went, shown once it is done or failed
+    var report by remember { mutableStateOf<String?>(null) }
     // the notification an export in the background shows its progress in; asked for once
     val notify = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
@@ -127,7 +133,7 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
             }
             cover = picture
             val uri = picture?.let { withContext(Dispatchers.IO) { publishPhoto(context, it) } }
-            stage = if (uri != null) Stage.Done(uri) else Stage.Failed("The photo could not be saved.")
+            stage = if (uri != null) Stage.Done(uri, null) else Stage.Failed("The photo could not be saved.", null)
             return@LaunchedEffect
         }
         cover = withContext(Threads.preview) {
@@ -151,39 +157,61 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                 scope.launch(Dispatchers.Main) { progress = fraction }
             }
 
+            override fun onReport(report: String) {
+                scope.launch(Dispatchers.Main) { ExportScreen.this.report = report }
+            }
+
             override fun onDone(path: String) {
                 scope.launch {
                     val uri = withContext(Dispatchers.IO) { if (gif) publishGif(appContext, File(path)) else publish(appContext, File(path)) }
-                    ExportService.finish(appContext, if (gif) "Saved to Pictures" else "Saved to your device")
-                    stage = Stage.Done(uri)
+                    ExportService.finish(appContext, appContext.getString(if (gif) R.string.export_saved_pictures else R.string.export_saved))
+                    stage = Stage.Done(uri, report)
                 }
             }
 
             override fun onFailed(message: String, cancelled: Boolean) {
-                ExportService.finish(appContext, if (cancelled) null else "Export failed")
+                // whatever was written of it, nobody will open: the cache is not the place to keep it
+                runCatching { File(out).delete() }
+                ExportService.finish(appContext, if (cancelled) null else appContext.getString(R.string.export_failed))
                 scope.launch(Dispatchers.Main) {
-                    if (cancelled) onClose() else stage = Stage.Failed(message)
+                    if (cancelled) onClose() else stage = Stage.Failed(message, report)
                 }
             }
         }
-        // the app may go to the background now: the service keeps it going
-        ExportService.start(appContext)
+        // the app may go to the background now: the service keeps it going. It is started before the
+        // engine is asked, because the engine refuses a second export while one runs (Busy), and that
+        // refusal is a failure of this attempt alone - the export already running keeps its service.
+        val owns = ExportService.start(appContext, out)
         val started = withContext(Threads.commands) {
             runCatching {
+                if (!gif) {
+                    // before the first frame is drawn: the size, the wait, and whether the phone has
+                    // room for it at all - an export that fills the disk at 99 percent is worse than
+                    // one that never starts
+                    val cost = runCatching { exportEstimate(s, ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), vm.exportHevc, out)) }.getOrNull()
+                    if (cost != null && !cost.fits) {
+                        stage = Stage.Failed(
+                            "Not enough space: this export needs about " + sizeText(cost.bytes) +
+                                " and " + sizeText(cost.freeBytes ?: 0u) + " is free. Free up some space and try again.",
+                        )
+                        return@runCatching
+                    }
+                }
                 if (gif) {
                     startGifExport(s, GifSettings(out, vm.gifSize.toUInt(), vm.gifFps.toUInt()), listener)
                 } else {
                     startExport(
                         s,
-                        ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), false, out),
+                        ExportSettings(res.toUInt(), vm.exportFps.toUInt(), kbps.toUInt(), vm.exportHevc, out),
                         listener,
                     )
                 }
             }
         }
         started.onFailure {
-            ExportService.finish(appContext, null)
-            stage = Stage.Failed(it.userMessage)
+            runCatching { File(out).delete() }
+            if (owns) ExportService.finish(appContext, null)
+            stage = Stage.Failed(it.userMessage, report)
         }
     }
 
@@ -212,11 +240,12 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                 if (stage is Stage.Running) runCatching { cancelExport() }
                 onClose()
             }, contentAlignment = Alignment.Center) {
-                Glyph(if (stage is Stage.Done) LucideIcons.ChevronLeft else LucideIcons.X, Palette.Text, size = 26.dp)
+                Glyph(if (stage is Stage.Done) LucideIcons.ChevronLeft else LucideIcons.X, Palette.Text, size = 26.dp,
+                    description = if (stage is Stage.Done) "Done" else "Close export")
             }
             Spacer(Modifier.weight(1f))
             if (stage is Stage.Done) {
-                Text("Done", style = Type.BodyStrong, modifier = Modifier.clickable(onClick = onHome).padding(12.dp))
+                Text(stringResource(R.string.export_done), style = Type.BodyStrong, modifier = Modifier.clickable(onClick = onHome).padding(12.dp))
             }
         }
         Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -242,6 +271,9 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                                 setVideoURI(st.uri)
                             }
                         },
+                        // a VideoView that leaves the page still holds its decoder until it is told to
+                        // let go; the page closes on the way Home, right after a finished export
+                        onRelease = { it.stopPlayback() },
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else if (b != null) {
@@ -249,8 +281,14 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                 }
                 if (stage is Stage.Running) {
                     // the share done, written over the dimmed cover
-                    Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.Center) {
+                    Column(Modifier.fillMaxSize().background(Color(0x99000000)), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("${(progress * 100).roundToInt()}%", style = Type.Title.copy(fontSize = 30.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold))
+                        Spacer(Modifier.height(16.dp))
+                        CircularProgressIndicator(
+                            progress = progress.coerceIn(0f, 1f),
+                            strokeWidth = 6.dp,
+                            modifier = Modifier.size(100.dp).padding(horizontal = 32.dp),
+                        )
                     }
                     Box(
                         Modifier.align(Alignment.BottomStart).fillMaxWidth(progress.coerceIn(0f, 1f)).height(3.dp).background(Palette.Accent),
@@ -265,7 +303,7 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                         Box(Modifier.weight(1f).height(1.dp).background(Color(0x33FFFFFF)))
                         Glyph(LucideIcons.Lightbulb, Palette.TextSecondary, size = 16.dp, modifier = Modifier.padding(horizontal = 8.dp))
                         Text(
-                            "You can leave CapCraft while the video saves",
+                            stringResource(R.string.export_leave_tip),
                             style = Type.Small.copy(textAlign = TextAlign.Center),
                             modifier = Modifier.width(240.dp),
                         )
@@ -276,18 +314,32 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Glyph(LucideIcons.CircleCheck, Palette.Accent, size = 20.dp)
                         Spacer(Modifier.width(6.dp))
-                        Text(if (vm.exportGif || vm.exportPhoto) "Saved to Pictures" else "Saved to your device", style = Type.BodyStrong.copy(fontSize = 16.sp))
+                        Text(stringResource(if (vm.exportGif || vm.exportPhoto) R.string.export_saved_pictures else R.string.export_saved), style = Type.BodyStrong.copy(fontSize = 16.sp))
+                    }
+                    st.report?.let { r ->
+                        Spacer(Modifier.height(14.dp))
+                        Text(stringResource(R.string.export_report), style = Type.Small.copy(textAlign = TextAlign.Center))
+                        Spacer(Modifier.height(6.dp))
+                        Text(r, style = Type.Small.copy(textAlign = TextAlign.Center), modifier = Modifier.padding(horizontal = 32.dp))
                     }
                     Spacer(Modifier.height(26.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(36.dp)) {
-                        ShareTarget(LucideIcons.Share2, "Share") { st.uri?.let { share(context, it) } }
-                        ShareTarget(LucideIcons.ExternalLink, "Open") { st.uri?.let { open(context, it, vm.exportGif, vm.exportPhoto) } }
+                        ShareTarget(LucideIcons.Share2, "Share", "Share the video") { st.uri?.let { share(context, it) } }
+                        ShareTarget(LucideIcons.ExternalLink, "Open", "Open the video") { st.uri?.let { open(context, it, vm.exportGif, vm.exportPhoto) } }
+                    }
+                }
                     }
                 }
                 is Stage.Failed -> {
-                    Text("Export failed", style = Type.Title)
+                    Text(stringResource(R.string.export_failed), style = Type.Title)
                     Spacer(Modifier.height(8.dp))
                     Text(st.message, style = Type.Small.copy(textAlign = TextAlign.Center), modifier = Modifier.padding(horizontal = 32.dp))
+                    st.report?.let { r ->
+                        Spacer(Modifier.height(14.dp))
+                        Text(stringResource(R.string.export_report), style = Type.Small.copy(textAlign = TextAlign.Center))
+                        Spacer(Modifier.height(6.dp))
+                        Text(r, style = Type.Small.copy(textAlign = TextAlign.Center), modifier = Modifier.padding(horizontal = 32.dp))
+                    }
                     Spacer(Modifier.height(20.dp))
                     Box(
                         Modifier.clip(RoundedCornerShape(8.dp)).background(Palette.Accent).clickable {
@@ -295,7 +347,7 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
                             stage = Stage.Running(0f)
                             attempt++
                         }.padding(horizontal = 24.dp, vertical = 10.dp),
-                    ) { Text("Try again", style = Type.BodyStrong.copy(color = Color.White)) }
+                    ) { Text(stringResource(R.string.action_retry), style = Type.BodyStrong.copy(color = Color.White)) }
                 }
             }
         }
@@ -303,17 +355,17 @@ fun ExportScreen(vm: EditorViewModel, onClose: () -> Unit, onHome: () -> Unit) {
             Box(
                 Modifier.padding(16.dp).fillMaxWidth().height(44.dp).clip(RoundedCornerShape(8.dp)).background(Color(0x22FFFFFF)).clickable(onClick = onHome),
                 contentAlignment = Alignment.Center,
-            ) { Text("New project", style = Type.BodyStrong) }
+            ) { Text(stringResource(R.string.export_new_project), style = Type.BodyStrong) }
         }
     }
 }
 
 /** One way to send the finished video on: a round button and its name under it. */
 @Composable
-private fun ShareTarget(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+private fun ShareTarget(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, description: String, onClick: () -> Unit) {
     Column(Modifier.clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(Modifier.size(52.dp).clip(RoundedCornerShape(26.dp)).background(Color(0x26FFFFFF)), contentAlignment = Alignment.Center) {
-            Glyph(icon, Palette.Text, size = 22.dp)
+            Glyph(icon, Palette.Text, size = 22.dp, description = description)
         }
         Spacer(Modifier.height(6.dp))
         Text(label, style = Type.Small.copy(color = Palette.Text))
@@ -342,12 +394,30 @@ private fun publishPhoto(context: Context, picture: Bitmap): Uri? = runCatching 
     val resolver = context.contentResolver
     val uri = resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
         ?: return@runCatching null
-    resolver.openOutputStream(uri)?.use { out -> picture.compress(Bitmap.CompressFormat.JPEG, 95, out) }
+    // The row is in the gallery's database already, hidden because it says it is pending. A write that
+    // stops half way is this helper's to take back, or the phone keeps a file that opens as nothing.
+    val written = runCatching {
+        val out = resolver.openOutputStream(uri) ?: error("the gallery gave no stream")
+        out.use { picture.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+    }
+    if (written.isFailure) {
+        runCatching { resolver.delete(uri, null, null) }
+        return@runCatching null
+    }
     values.clear()
     values.put(MediaStore.Images.Media.IS_PENDING, 0)
     resolver.update(uri, values, null, null)
     uri
 }.getOrNull()
+
+/**
+ * Puts [file] behind the gallery's [uri]. Throws where it cannot, so the caller can take the row back:
+ * a gallery entry half written and left to be found later is a file that opens as nothing.
+ */
+private fun copyInto(resolver: android.content.ContentResolver, uri: Uri, file: File) {
+    val out = resolver.openOutputStream(uri) ?: error("the gallery gave no stream")
+    out.use { sink -> file.inputStream().use { it.copyTo(sink, 1 shl 16) } }
+}
 
 /** Copies a finished GIF into Pictures/CapCraft and deletes the cache copy. */
 private fun publishGif(context: Context, file: File): Uri? = runCatching {
@@ -360,7 +430,11 @@ private fun publishGif(context: Context, file: File): Uri? = runCatching {
     val resolver = context.contentResolver
     val uri = resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
         ?: return@runCatching null
-    resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out, 1 shl 16) } }
+    val written = runCatching { copyInto(resolver, uri, file) }
+    if (written.isFailure) {
+        runCatching { resolver.delete(uri, null, null) }
+        return@runCatching null
+    }
     values.clear()
     values.put(MediaStore.Images.Media.IS_PENDING, 0)
     resolver.update(uri, values, null, null)
@@ -379,7 +453,11 @@ private fun publish(context: Context, file: File): Uri? = runCatching {
     val resolver = context.contentResolver
     val uri = resolver.insert(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
         ?: return@runCatching null
-    resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out, 1 shl 16) } }
+    val written = runCatching { copyInto(resolver, uri, file) }
+    if (written.isFailure) {
+        runCatching { resolver.delete(uri, null, null) }
+        return@runCatching null
+    }
     values.clear()
     values.put(MediaStore.Video.Media.IS_PENDING, 0)
     resolver.update(uri, values, null, null)
@@ -394,4 +472,11 @@ private fun share(context: Context, uri: Uri) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     context.startActivity(Intent.createChooser(send, null))
+}
+
+/** A file size a person reads: "1.2 GB", "210 MB". */
+private fun sizeText(bytes: ULong): String {
+    val b = bytes.toDouble()
+    return if (b >= 1_000_000_000) String.format(java.util.Locale.US, "%.1f GB", b / 1_000_000_000)
+    else String.format(java.util.Locale.US, "%.0f MB", (b / 1_000_000).coerceAtLeast(1.0))
 }

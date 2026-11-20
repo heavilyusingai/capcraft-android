@@ -101,7 +101,7 @@ fun ExportSheet(vm: EditorViewModel, onExport: () -> Unit) {
                         else -> resolutionLabel(exportResolutionOf(vm))
                     }
                     Text(label, style = Type.BodyStrong.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold))
-                    Glyph(MaterialIcons.ArrowDropUp, Palette.Text, size = 20.dp)
+                    Glyph(MaterialIcons.ArrowDropUp, Palette.Text, size = 20.dp, description = "Close export settings")
                 }
                 Spacer(Modifier.width(9.dp))
                 Box(
@@ -134,6 +134,7 @@ fun ExportSheet(vm: EditorViewModel, onExport: () -> Unit) {
             val r = RESOLUTIONS.indexOf(res).coerceAtLeast(0)
             SettingSlider("Resolution", RESOLUTION_HINTS[r], RESOLUTION_LABELS, r.toFloat()) {
                 vm.exportResolution = RESOLUTIONS[it.roundToInt().coerceIn(0, RESOLUTIONS.size - 1)]
+                vm.saveExportSettings()
             }
             if (vm.exportPhoto) {
                 Divider()
@@ -147,6 +148,18 @@ fun ExportSheet(vm: EditorViewModel, onExport: () -> Unit) {
             val f = FRAME_RATES.indexOf(vm.exportFps).coerceAtLeast(2)
             SettingSlider("Frame rate", if (vm.exportFps >= 50) "Very smooth motion" else "Steady, everyday motion", FRAME_RATES.map { "$it" }, f.toFloat()) {
                 vm.exportFps = FRAME_RATES[it.roundToInt().coerceIn(0, FRAME_RATES.size - 1)]
+                vm.saveExportSettings()
+            }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("HEVC (H.265)", style = Type.Body.copy(fontSize = 16.sp, color = Palette.DockText), modifier = Modifier.weight(1f))
+                Text("Smaller files at the same quality", style = Type.Small.copy(fontSize = 13.sp))
+                androidx.compose.material3.Switch(
+                    checked = vm.exportHevc,
+                    onCheckedChange = {
+                        vm.exportHevc = it
+                        vm.saveExportSettings()
+                    },
+                )
             }
             val dims = exportSize(t.width, t.height, res.toUInt())
             val suggested = (suggestedBitrateKbps(dims[0], dims[1], vm.exportFps.toUInt()).toInt() / 1000.0).roundToInt().coerceAtLeast(1)
@@ -155,6 +168,7 @@ fun ExportSheet(vm: EditorViewModel, onExport: () -> Unit) {
                 val chosen = positionToMbps(it)
                 // the suggestion is sticky, so it can be found again
                 vm.exportMbps = if (abs(chosen - suggested) <= max(1, suggested / 10)) null else chosen
+                vm.saveExportSettings()
             }
             Divider()
             val kbps = exportKbps(vm, dims[0].toInt(), dims[1].toInt())

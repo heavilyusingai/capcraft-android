@@ -662,8 +662,7 @@ private fun ColumnScope.PresetsContent(vm: EditorViewModel) {
         return
     }
     androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
-        items(items.size) { i ->
-            val (name, params) = items[i]
+        items(items, key = { it.first }) { (name, params) ->
             val keys = params.keys().asSequence().filter { it != PRESET_PLUS } +
                 (params.optJSONObject(PRESET_PLUS)?.keys()?.asSequence() ?: emptySequence())
             Row(

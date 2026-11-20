@@ -4,6 +4,7 @@ import org.gradle.process.ExecOperations
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.baselineProfile)
 }
 
 // The Rust half of the app: this Gradle project is the android/ folder of the `capcraft-android`
@@ -301,6 +302,16 @@ android {
     buildFeatures {
         compose = true
     }
+    composeOptions {
+        kotlinCompilerExtensionVersion = libs.versions.kotlin.get()
+    }
+}
+
+// Compose compiler metrics in CI: track unstable composables (inline lambdas,
+// non-skippable params) in editor panels; fix the top 5 per build.
+composeCompiler {
+    enableMetrics = true
+    metricsDestination = layout.buildDirectory.dir("compose-metrics")
 }
 
 androidComponents {
@@ -358,10 +369,9 @@ androidComponents {
     }
 }
 
-// reproducible builds: no baseline profile in the APK (its bytes vary from one build to the next)
-tasks.configureEach {
-    if (name.contains("ArtProfile")) enabled = false
-}
+// reproducible builds: Baseline Profiles are committed to src (saveInSrc = true),
+// so the generated baseline-prof.txt is deterministic across builds. Keep the
+// Baseline Profile Gradle plugin tasks enabled; they write the committed file.
 
 dependencies {
     implementation(libs.androidx.core.ktx)
@@ -375,5 +385,14 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.jna) { artifact { type = "aar" } }
+    // profileinstaller installs Baseline Profiles on first run (ART AOT compilation)
+    implementation(libs.profileInstaller)
+    baselineProfile(project(":baselineprofile"))
     testImplementation(libs.junit)
+}
+
+// Baseline Profiles: commit generated rules, one profile for all variants
+baselineProfile {
+    saveInSrc = true
+    mergeIntoMain = true
 }

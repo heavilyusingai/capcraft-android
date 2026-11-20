@@ -323,6 +323,8 @@ impl FrameRate {
     });
     /// 60 fps.
     pub const SIXTY: Self = Self(Rational { num: 60, den: 1 });
+    /// 120 fps: what a phone records a slow-motion burst at.
+    pub const HUNDRED_TWENTY: Self = Self(Rational { num: 120, den: 1 });
 
     /// Builds a frame rate from an exact fraction of frames per second.
     ///

@@ -54,11 +54,13 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import io.github.artcraftandroid.capcraft.R
 import io.github.artcraftandroid.capcraft.ui.Glyph
 import io.github.artcraftandroid.capcraft.ui.LucideIcons
 import io.github.artcraftandroid.capcraft.ui.Palette
@@ -288,7 +290,7 @@ fun SoundsPage(vm: EditorViewModel) {
         Row(Modifier.fillMaxWidth().height(44.dp)) {
             listOf(LucideIcons.Folder, LucideIcons.Bookmark).forEachIndexed { i, icon ->
                 Box(Modifier.weight(1f).fillMaxSize().clickable { tab = i }, contentAlignment = Alignment.Center) {
-                    Glyph(icon, if (i == tab) Color.White else Palette.TextSecondary, size = 22.dp)
+                    Glyph(icon, if (i == tab) Color.White else Palette.TextSecondary, size = 22.dp, description = stringResource(if (i == 0) R.string.tab_files else R.string.tab_saved))
                     if (i == tab) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp).background(Palette.Accent))
                 }
             }
